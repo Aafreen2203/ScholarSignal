@@ -39,10 +39,22 @@ make up
 ```
 
 Open the research discovery app at `http://localhost:3000`; API docs are at
-`http://localhost:8000/api/docs`. Compose starts PostgreSQL/Redis, applies
-Alembic migrations, and starts the app. The local workspace and five existing
-source records remain in Compose's named PostgreSQL volume across container
-restarts.
+`http://localhost:8000/api/docs`. Compose runs the Next.js development server
+with HMR (container port 3001 mapped to host port 3000), starts PostgreSQL and
+Redis, applies Alembic migrations, and starts the API. Open the app through
+`localhost` or the configured development-port forward; do not use a container
+or host-interface IP as the browser URL unless that route supports WebSocket
+upgrades. Next.js permits the Docker bridge host pattern `172.18.*.*` and
+`host.docker.internal` for development-only requests; set
+`NEXT_ALLOWED_DEV_ORIGINS` to a comma-separated list of additional development
+hostnames when using another port-forward domain. The local workspace and five
+existing source records remain in Compose's named PostgreSQL volume across
+container restarts.
+
+To run only the frontend on the host instead, use `cd frontend && npm run dev`.
+That dev server binds to all interfaces on port 3001; visit
+`http://localhost:3001`. Do not run both frontend development servers on the
+same host port.
 
 The OpenAlex credentials in `.env` are used only by operator-run ingestion.
 Ingestion does not run automatically. The five-record smoke result is already

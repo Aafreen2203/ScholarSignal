@@ -37,6 +37,34 @@ test("login through the Next proxy opens the protected workspace", async ({ page
   await expect(page.getByText(`Signed in as ${email}`)).toBeVisible();
 });
 
+test("login shows a loading state, prevents duplicate submissions, and explains server failures", async ({ page }) => {
+  let loginRequests = 0;
+  await page.route("**/api/v1/auth/login", async (route) => {
+    loginRequests += 1;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await route.fulfill({
+      status: 503,
+      contentType: "text/html",
+      body: "Service unavailable",
+    });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("Email address").fill("reader@example.com");
+  await page.getByLabel("Password").fill("a valid-looking password");
+  await page.locator("form").evaluate((form: HTMLFormElement) => {
+    form.requestSubmit();
+    form.requestSubmit();
+  });
+
+  const submitButton = page.getByRole("button", { name: "Signing in…" });
+  await expect(submitButton).toBeDisabled();
+  await expect(page.locator("p[role=alert]")).toContainText(
+    "The sign-in service is temporarily unavailable. Please try again shortly.",
+  );
+  expect(loginRequests).toBe(1);
+});
+
 test("unauthenticated visits to workspace redirect to login", async ({ page }) => {
   await page.goto("/workspace");
   await expect(page).toHaveURL(/\/login$/);

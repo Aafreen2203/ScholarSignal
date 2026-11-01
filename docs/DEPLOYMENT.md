@@ -16,10 +16,20 @@ curl -fsS http://localhost:8000/health/ready
 ```
 
 Frontend: `http://localhost:3000`; API docs: `http://localhost:8000/api/docs`.
-The backend container applies Alembic migrations through the current head before
-starting FastAPI. PostgreSQL data and FastEmbed's model cache use named volumes.
-Do not use `docker compose down -v` for routine cleanup: that removes the
-database and model cache volumes. `docker compose down` leaves them in place.
+Compose runs Next.js in development mode, binding to `0.0.0.0:3001` inside the
+container and publishing it on host port 3000. Source files are mounted for
+live reload. Use `localhost` or a development-port forward that supports
+WebSocket upgrades in the browser; an internal/container IP reached through an
+HTTP-only proxy will load pages but cannot carry the HMR WebSocket. The backend
+container applies Alembic migrations through the current head before starting
+FastAPI. PostgreSQL data and FastEmbed's model cache use named volumes. Do not
+use `docker compose down -v` for routine cleanup: that removes the database and
+model cache volumes. `docker compose down` leaves them in place.
+
+For a host-run frontend instead of the Compose frontend, use
+`cd frontend && npm run dev`; it binds to `0.0.0.0:3001`. Open it at
+`http://localhost:3001`. Do not run both frontend dev servers on host port
+3001 at the same time.
 
 Useful checks:
 

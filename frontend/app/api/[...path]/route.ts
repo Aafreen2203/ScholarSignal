@@ -6,7 +6,16 @@ async function forward(request: NextRequest, { params }: { params: Promise<{ pat
   const url = `${API}/api/${path.map(encodeURIComponent).join("/")}${request.nextUrl.search}`;
   const headers = new Headers();
   for (const key of ["content-type", "cookie"]) { const value = request.headers.get(key); if (value) headers.set(key, value); }
-  const upstream = await fetch(url, { method: request.method, headers, body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer(), cache: "no-store", redirect: "manual" });
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, { method: request.method, headers, body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer(), cache: "no-store", redirect: "manual" });
+  } catch (error) {
+    console.error("API proxy could not reach its upstream service", error);
+    return NextResponse.json(
+      { detail: "The application service is temporarily unavailable. Please try again shortly." },
+      { status: 502 },
+    );
+  }
   const responseHeaders = new Headers();
   for (const key of ["content-type", "set-cookie", "retry-after", "www-authenticate"]) {
     const value = upstream.headers.get(key);
@@ -20,4 +29,3 @@ export const POST = forward;
 export const PUT = forward;
 export const PATCH = forward;
 export const DELETE = forward;
-

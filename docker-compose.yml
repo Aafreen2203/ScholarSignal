@@ -1,9 +1,14 @@
 services:
   frontend:
     build: ./frontend
+    command: ["npm", "run", "dev"]
     environment:
       API_INTERNAL_URL: http://backend:8000
-    ports: ["3000:3000"]
+      NEXT_ALLOWED_DEV_ORIGINS: ${NEXT_ALLOWED_DEV_ORIGINS:-}
+    ports: ["3000:3001"]
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
     depends_on: [backend]
   backend:
     build:
@@ -55,4 +60,3 @@ services:
 volumes:
   postgres_data:
   embedding_cache:
-
