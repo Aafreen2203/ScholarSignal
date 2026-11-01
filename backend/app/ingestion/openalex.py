@@ -5,15 +5,25 @@ import random
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from backend.app.core.config import OpenAlexConfigurationError
+from backend.app.ingestion.openalex_usage import (
+    BudgetReservation,
+    OpenAlexBudgetError,
+    OpenAlexBudgetGuard,
+    OpenAlexRateLimit,
+)
 from backend.app.ingestion.text import embedding_text, embedding_text_hash
 from backend.app.models import IngestionJob, Publication
 
@@ -25,6 +35,28 @@ MAX_RETRIES = 5
 
 class OpenAlexError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class OpenAlexResponse:
+    payload: dict[str, Any]
+    headers: dict[str, str]
+    rate_limit: OpenAlexRateLimit
+    status_code: int
+
+
+class _OpenAlexBearerAuth(httpx.Auth):
+    def __init__(self, api_key: str):
+        self._api_key = SecretStr(api_key)
+
+    def auth_flow(self, request: httpx.Request):
+        request.headers["Authorization"] = (
+            f"Bearer {self._api_key.get_secret_value()}"
+        )
+        yield request
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(api_key={self._api_key!r})"
 
 
 def _retry_delay(attempt: int, retry_after: str | None, *, now: datetime | None = None) -> float:
@@ -52,44 +84,114 @@ class OpenAlexClient:
         max_retries: int = MAX_RETRIES,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        budget_guard: OpenAlexBudgetGuard | None = None,
+        budget_session: Session | None = None,
     ):
         if not api_key.strip():
-            raise ValueError(
-                "OPENALEX_API_KEY is required; cursor paging past page one needs a key"
-            )
+            raise OpenAlexConfigurationError("OPENALEX_API_KEY is required for OpenAlex ingestion.")
         if not mailto.strip() or "@" not in mailto:
-            raise ValueError("OPENALEX_MAILTO must be a contact email for the OpenAlex polite pool")
+            raise OpenAlexConfigurationError(
+                "OPENALEX_MAILTO must be a valid contact email for OpenAlex ingestion."
+            )
         if not 1 <= per_page <= DEFAULT_PER_PAGE:
             raise ValueError("OpenAlex per_page must be between 1 and 100")
-        self.api_key = api_key
         self.mailto = mailto
         self.per_page = per_page
         self.max_retries = max_retries
         self.sleep = sleep
+        if (budget_guard is None) != (budget_session is None):
+            raise ValueError("OpenAlex budget guard and database session must be provided together")
+        self.budget_guard = budget_guard
+        self.budget_session = budget_session
         self.client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=timeout,
             transport=transport,
             headers={
                 "User-Agent": f"ScholarSignal/0.1 (mailto:{mailto})",
-                "Authorization": f"Bearer {api_key}",
             },
+            auth=_OpenAlexBearerAuth(api_key),
         )
 
-    def fetch_page(self, *, cursor: str, filters: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _response(response: httpx.Response) -> OpenAlexResponse:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        tracked_names = {
+            "x-ratelimit-limit",
+            "x-ratelimit-remaining",
+            "x-ratelimit-credits-used",
+            "x-ratelimit-reset",
+        }
+        headers = {
+            key.casefold(): value
+            for key, value in response.headers.items()
+            if key.casefold() in tracked_names
+        }
+        return OpenAlexResponse(
+            payload=payload,
+            headers=headers,
+            rate_limit=OpenAlexRateLimit.from_response(headers, payload),
+            status_code=response.status_code,
+        )
+
+    def _get(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        max_cost_usd: Decimal | None = None,
+        allow_initial_budget_check: bool = False,
+    ) -> httpx.Response:
+        reservation: BudgetReservation | None = None
+        if self.budget_guard is not None:
+            if allow_initial_budget_check:
+                reservation = self.budget_guard.reserve_budget_check(self.budget_session)
+            elif max_cost_usd is None:
+                raise OpenAlexBudgetError("A maximum request cost is required for budget enforcement.")
+            else:
+                reservation = self.budget_guard.reserve(self.budget_session, max_cost_usd)
+        try:
+            response = self.client.get(path, params=params)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            if reservation is not None:
+                self.budget_guard.record_unknown_result(self.budget_session, reservation)
+            raise OpenAlexError(
+                f"OpenAlex request failed ({type(exc).__name__}); usage is unverified"
+            ) from None
+        if reservation is not None:
+            wrapped = self._response(response)
+            self.budget_guard.record_response(
+                self.budget_session, reservation, wrapped.rate_limit
+            )
+        return response
+
+    def fetch_page_response(
+        self, *, cursor: str, filters: dict[str, Any]
+    ) -> OpenAlexResponse:
         params = {**filters, "per_page": self.per_page, "cursor": cursor}
         for attempt in range(self.max_retries + 1):
             try:
-                response = self.client.get("/works", params=params)
+                response = self._get(
+                    "/works",
+                    params=params,
+                    max_cost_usd=Decimal("0.0001") if self.budget_guard else None,
+                )
                 if response.status_code == 429 or response.status_code >= 500:
+                    if self.budget_guard is not None:
+                        raise OpenAlexError(f"OpenAlex returned HTTP {response.status_code}")
                     if attempt < self.max_retries:
                         self.sleep(_retry_delay(attempt, response.headers.get("Retry-After")))
                         continue
                 response.raise_for_status()
-                payload = response.json()
-                if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                result = self._response(response)
+                if not isinstance(result.payload.get("results"), list):
                     raise OpenAlexError("OpenAlex returned an invalid page envelope")
-                return payload
+                return result
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 if attempt == self.max_retries:
                     raise OpenAlexError(
@@ -101,6 +203,26 @@ class OpenAlexClient:
                 # Avoid echoing the request URL because it contains the API key.
                 raise OpenAlexError(f"OpenAlex returned HTTP {status}") from None
         raise OpenAlexError("OpenAlex retries exhausted")
+
+    def fetch_page(self, *, cursor: str, filters: dict[str, Any]) -> dict[str, Any]:
+        """Backward-compatible payload-only wrapper used by existing ingestion callers."""
+        return self.fetch_page_response(cursor=cursor, filters=filters).payload
+
+    def fetch_rate_limit(
+        self,
+    ) -> OpenAlexResponse:
+        response = self._get(
+            "/rate-limit",
+            allow_initial_budget_check=True,
+        )
+        if response.status_code != 200:
+            raise OpenAlexError(f"OpenAlex rate-limit endpoint returned HTTP {response.status_code}")
+        wrapped = self._response(response)
+        if not wrapped.rate_limit.complete:
+            raise OpenAlexBudgetError(
+                "OpenAlex rate-limit response did not contain complete verifiable usage data."
+            )
+        return wrapped
 
     def close(self):
         self.client.close()

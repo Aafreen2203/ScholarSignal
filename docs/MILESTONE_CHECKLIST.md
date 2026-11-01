@@ -105,10 +105,10 @@ lint, optimized build, backend Ruff, and compile checks also pass.
 The separate hosted GitHub Actions workflow has not been run because this
 checkout has no Git remote or `gh` executable. Its execution remains
 unobserved; no hosted CI result is claimed. Under the existing checklist gate,
-Milestone 1 remains **pending that hosted run**. Milestone 2 remains
-**in progress at the user's direction**; no later milestone has started.
+Milestone 1 remains **pending that hosted run**. Milestone 2 is now verified
+complete; Milestone 3 has not started.
 
-## Milestone 2 — OpenAlex ingestion and semantic search (in progress)
+## Milestone 2 — OpenAlex ingestion and semantic search (complete)
 
 - [x] Implement the OpenAlex Works client using current bearer-key
   authentication, contact User-Agent, `per_page <= 100`, cursor pagination,
@@ -122,8 +122,13 @@ Milestone 1 remains **pending that hosted run**. Milestone 2 remains
   `0003_ingestion_offset_index`, and `0004_embedding_source_hash` for
   publications, ingestion jobs, nullable source fields, raw provenance,
   pgvector extension/vectors, full-text GIN and vector HNSW indexes, and
-  normalized input hashes. Compose PostgreSQL and a separate PostgreSQL test
-  database are migrated to `0004_embedding_source_hash (head)`.
+  normalized input hashes. The separate PostgreSQL test database was verified
+  at `0004_embedding_source_hash`; Compose PostgreSQL was subsequently migrated
+  through `0006_openalex_usage_events` for the real-data smoke run.
+- [x] Add Alembic migrations `0005_openalex_usage` and
+  `0006_openalex_usage_events` for persistent account snapshots, the $0.10
+  per-UTC-day project ceiling, request reservations/results, and auditable
+  manual reconciliation. The original unknown-cost aggregate is preserved.
 - [x] Add defensive OpenAlex metadata normalization and unique-ID upserts.
   Tests verify malformed/missing fields, `NULL` versus citation count `0`,
   provenance, repeated upserts, pagination offsets, retry-after, failure
@@ -156,25 +161,89 @@ Milestone 1 remains **pending that hosted run**. Milestone 2 remains
 - [x] Document model/input provenance and evaluation limits. No retrieval
   latency, relevance metrics, or model-quality claims are reported without a
   valid labelled evaluation set.
-- [ ] Run the documented real OpenAlex smoke ingestion, inspect persisted
-  source IDs/metadata, then run the real embedding CLI and search those source
-  records. No OpenAlex API key or contact address is configured in this
-  environment; this gate remains open and no live OpenAlex data is claimed.
+- [x] Run one controlled real-data smoke request on 2026-11-01 using the
+  dedicated `smoke` command, `publication_year:2024`, one page, and a five-work
+  page size. One `/works` request returned and persisted five records in
+  PostgreSQL; the job is paused with its next cursor saved. Actual cost was
+  $0.0001 (1 credit), leaving $0.9999 of the account's $1.00 daily budget.
+  Project spend is $0.0001 against the $0.10 UTC ceiling.
+- [x] Generate embeddings only for the five newly ingested OpenAlex records
+  using local FastEmbed `sentence-transformers/all-MiniLM-L6-v2` 0.9.1. Five
+  complete vectors are linked to the five expected OpenAlex IDs; each has 384
+  finite dimensions. No other publication rows existed and no prior complete
+  embeddings were regenerated.
+- [x] Verify lexical search through the FastAPI API and Next.js proxy using
+  real records, including titles, abstracts, OpenAlex IDs, keyword ranking, and
+  an empty-result query. Verify semantic search through FastAPI and the browser
+  proxy using local query embeddings and PostgreSQL pgvector; expected real
+  OpenAlex records ranked first for protein structure, cancer statistics, and
+  indigenous research queries. These checks are functional examples, not a
+  labelled relevance evaluation.
 
 ### Milestone 2 evidence and status
 
 Observed locally on 2026-11-01: Compose PostgreSQL and the separate PostgreSQL
-test database are at `0004_embedding_source_hash (head)`; `/health/ready`
-returned PostgreSQL and Redis reachable; both application images rebuilt and
-started; frontend typecheck/lint/production build passed; all five Playwright
-scenarios passed through Next.js and FastAPI; and the final service-backed
-backend suite passed **19 tests** against real PostgreSQL plus real Redis DB
-15. The real FastEmbed model returned 384 finite values and generated and
-retrieved a temporary test-only fixture through pgvector. This is model and
-storage evidence, not a real OpenAlex-data smoke test. No latency or relevance
-metric is available without labelled judgments.
+test database were at `0004_embedding_source_hash`; the Compose database is at
+`0006_openalex_usage_events (head)`. The one-page live smoke returned five
+records for one request, and the account reported a $0.0001 request cost. All
+five real records received a finite 384-dimensional FastEmbed vector. API and
+browser-proxy lexical and semantic searches returned the expected records and
+fields. The complete local backend suite passed **36 tests, 1 skipped**;
+Ruff, compileall, and diff checks passed. A Chromium browser test passed via the
+existing Playwright 1.56.1 container. The prior FastEmbed fixture test remains
+separately identified as synthetic. No latency or retrieval-quality metric is
+reported without labelled judgments.
 
-Milestone 2 remains **in progress** until the configured real-data smoke gate is
-run and inspected. Milestone 1's hosted GitHub Actions evidence also remains
-unobserved from the prior checklist; no hosted run is claimed. Milestone 3 has
-not started.
+Milestone 2 is **complete** against its ingestion and search acceptance
+criteria. Its live data smoke, real-record embeddings, and lexical/semantic
+integration are verified. Milestone 1's hosted GitHub Actions evidence remains
+unobserved; no hosted run is claimed.
+
+## Product functionality continuation (post-Milestone 2 foundation)
+
+- [x] Add owner-scoped saved papers, collections, collection membership,
+  research notes, recent views, and bounded search history with migration
+  `0007_research_workspace`. Isolated PostgreSQL migration reached
+  `0007_research_workspace (head)`; the Compose database also reports that
+  revision. The existing five publication rows and all five complete vectors
+  (384 dimensions) remained present after rebuilding/restarting app services.
+- [x] Expose workspace APIs through the Next.js same-origin proxy; verify
+  authenticated create/list/delete, collection contents, membership add/remove,
+  and notes flows in the browser suite. Seven Playwright tests passed, including registration,
+  session persistence, login, protected route, logout, rate-limit response,
+  search, paper detail/related records, and workspace CRUD.
+- [x] Add paper detail pages with stored OpenAlex metadata, DOI/OpenAlex source
+  links, references where present, save actions, and locally computed related
+  records. Browser verification used the five persisted real records.
+- [x] Add lexical, semantic, and reciprocal-rank hybrid search with bounded
+  candidate reporting, metadata/year filtering, pagination, sorting,
+  per-result explanations, empty/loading/error states, and search-history
+  integration. Calls through `/api/v1/search` on the Next.js proxy returned
+  the expected cancer, AlphaFold 3, and Indigenous-methodology records and
+  abstracts; the year-filter case also returned the 2024 cancer record.
+- [x] Add a documented five-query, five-record single-annotator pilot and
+  executable Precision@3, Recall@3, MRR, nDCG@3, and latency evaluation.
+  Latest local PostgreSQL/pgvector run recorded lexical 0.2/0.6/0.6/0.6,
+  semantic 0.3333/1/1/1, and hybrid 0.3333/1/1/1 for those metrics, with
+  mean latencies 10.853/21.385/19.346 ms. This tiny subjective set is not a
+  general quality claim or a valid comparison benchmark.
+- [x] Run the full backend suite on isolated PostgreSQL and Redis DB 14 after
+  applying Alembic migrations: **43 passed**. The host SQLite/default test run
+  reported **42 passed, 1 skipped** (the PostgreSQL-only case). Ruff,
+  `compileall`, frontend TypeScript, ESLint, and production build passed.
+- [x] Rebuild and recreate Compose backend/frontend without resetting data;
+  verify PostgreSQL and Redis health, readiness endpoint, migration head,
+  record/vector counts, and no traceback/error in the inspected app log tail.
+- [x] Run the seven Playwright browser tests against the rebuilt Compose
+  frontend and backend using Playwright 1.56.1: **7 passed**.
+- [ ] Hosted GitHub Actions run remains unobserved. No remote was available in
+  this local checkout; local verification does not substitute for hosted CI.
+- [ ] Background ingestion/queue worker, production deployment, independent
+  multi-annotator search judgments, larger-corpus load benchmarks, and
+  personalized recommendations remain unfinished. Ingestion remains an
+  explicit budget-guarded operator CLI and was not run in this continuation.
+
+This continuation did not start Milestone 3 and made no OpenAlex requests.
+It preserves the project’s five real OpenAlex records and their existing
+embeddings. It does not resolve the outstanding hosted Milestone 1 Actions
+gate, so the overall project is not represented as fully verified.

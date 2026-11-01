@@ -5,7 +5,20 @@ from sqlalchemy import engine_from_config, pool
 
 from backend.app.core.config import get_settings
 from backend.app.db.base import Base
-from backend.app.models import IngestionJob, Publication, PublicationEmbedding, User  # noqa: F401
+from backend.app.models import (  # noqa: F401
+    CollectionPublication,
+    IngestionJob,
+    OpenAlexDailyUsage,
+    OpenAlexUsageEvent,
+    Publication,
+    PublicationEmbedding,
+    PublicationView,
+    ResearchCollection,
+    ResearchNote,
+    SavedPublication,
+    SearchHistory,
+    User,
+)
 
 config = context.config
 config.set_main_option("sqlalchemy.url", get_settings().database_url)

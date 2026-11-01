@@ -8,9 +8,16 @@ hash for cache invalidation. Rows retain model name/version, dimensions,
 generation status, attempts, and timestamps. Missing source text is marked
 `skipped`; no vector is fabricated.
 
-The first retrieval baseline is PostgreSQL English full-text ranking. Semantic
+The lexical baseline is PostgreSQL English full-text ranking. Semantic
 retrieval compares a real query embedding with persisted vectors using cosine
-similarity in pgvector. Search explains the selected method. There is no labelled
-evaluation dataset yet, so latency and relevance metrics are withheld. Training,
-graph ML, personalization, and advanced ranking remain out of scope.
+similarity in pgvector. Hybrid retrieval uses reciprocal-rank fusion with a
+bounded candidate window. Search explains each method and reports when hybrid
+candidates were capped. Related-paper results use stored publication vectors.
+
+The repository includes a five-query, five-document, single-annotator pilot
+judgment set and records Precision@3, Recall@3, MRR, nDCG@3, and warm local
+latency. It is explicitly a tiny functional pilot, not a representative
+benchmark; see [EVALUATION.md](EVALUATION.md). The system does not fine-tune the
+encoder, call an external LLM, or use evaluation data for model training.
+Graph ML, personalization, and learned/advanced ranking remain out of scope.
 

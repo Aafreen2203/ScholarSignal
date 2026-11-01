@@ -8,6 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from backend.app.api.auth import router as auth_router
 from backend.app.api.search import router as search_router
+from backend.app.api.workspace import router as workspace_router
 from backend.app.core.config import get_settings
 from backend.app.core.redis import get_redis_client
 from backend.app.db.session import engine
@@ -19,11 +20,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_origin],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Content-Type"],
 )
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(search_router, prefix="/api/v1")
+app.include_router(workspace_router, prefix="/api/v1")
 
 
 @app.get("/health/live", tags=["health"])

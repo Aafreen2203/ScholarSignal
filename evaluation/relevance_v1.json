@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "name": "scholarsignal-five-record-pilot-v1",
+  "corpus": "The five genuine OpenAlex publications already stored locally in ScholarSignal; document identifiers below are source OpenAlex IDs.",
+  "labeling": "Single-pass project-author judgments based on the stored title and abstract. Grades: 0 not relevant, 1 partially relevant, 2 directly relevant. This tiny convenience set is a smoke evaluation, not an independent or representative benchmark.",
+  "queries": [
+    {
+      "id": "q1",
+      "query": "protein structure prediction and molecular interactions",
+      "judgments": {
+        "https://openalex.org/W4396721167": 2,
+        "https://openalex.org/W4393935425": 0,
+        "https://openalex.org/W2029648951": 0,
+        "https://openalex.org/W3118608800": 0,
+        "https://openalex.org/W4392145873": 0
+      }
+    },
+    {
+      "id": "q2",
+      "query": "cancer incidence mortality estimates across countries",
+      "judgments": {
+        "https://openalex.org/W4396721167": 0,
+        "https://openalex.org/W4393935425": 2,
+        "https://openalex.org/W2029648951": 0,
+        "https://openalex.org/W3118608800": 0,
+        "https://openalex.org/W4392145873": 0
+      }
+    },
+    {
+      "id": "q3",
+      "query": "decolonizing research with Indigenous peoples",
+      "judgments": {
+        "https://openalex.org/W4396721167": 0,
+        "https://openalex.org/W4393935425": 0,
+        "https://openalex.org/W2029648951": 2,
+        "https://openalex.org/W3118608800": 0,
+        "https://openalex.org/W4392145873": 0
+      }
+    },
+    {
+      "id": "q4",
+      "query": "learning image features from tiny image datasets",
+      "judgments": {
+        "https://openalex.org/W4396721167": 0,
+        "https://openalex.org/W4393935425": 0,
+        "https://openalex.org/W2029648951": 0,
+        "https://openalex.org/W3118608800": 2,
+        "https://openalex.org/W4392145873": 0
+      }
+    },
+    {
+      "id": "q5",
+      "query": "Final Pleistocene archaeological sites in Senegal",
+      "judgments": {
+        "https://openalex.org/W4396721167": 0,
+        "https://openalex.org/W4393935425": 0,
+        "https://openalex.org/W2029648951": 0,
+        "https://openalex.org/W3118608800": 0,
+        "https://openalex.org/W4392145873": 2
+      }
+    }
+  ]
+}

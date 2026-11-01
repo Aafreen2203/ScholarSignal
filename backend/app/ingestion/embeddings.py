@@ -22,16 +22,21 @@ class Encoder(Protocol):
 
 
 class FastEmbedEncoder:
-    def __init__(self, model_name: str = MODEL_NAME):
+    def __init__(self, model_name: str = MODEL_NAME, cache_path: str | None = None):
         self.model_name = model_name
-        self.model = self._load_model(model_name)
+        if cache_path is None:
+            from backend.app.core.config import get_settings
+
+            cache_path = get_settings().fastembed_cache_path
+        self.cache_path = cache_path
+        self.model = self._load_model(model_name, cache_path)
 
     @staticmethod
     @lru_cache(maxsize=4)
-    def _load_model(model_name: str):
+    def _load_model(model_name: str, cache_path: str | None):
         from fastembed import TextEmbedding
 
-        return TextEmbedding(model_name=model_name)
+        return TextEmbedding(model_name=model_name, cache_dir=cache_path)
 
     def embed(self, texts: list[str]):
         return self.model.embed(texts)

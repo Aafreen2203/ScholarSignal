@@ -1,3 +1,6 @@
+from datetime import UTC, datetime
+from decimal import Decimal
+
 import httpx
 import numpy as np
 import pytest
@@ -18,8 +21,20 @@ from backend.app.ingestion.openalex import (
     run_key,
     upsert_page,
 )
+from backend.app.ingestion.openalex_usage import (
+    DEFAULT_DAILY_CEILING_USD,
+    OpenAlexBudgetError,
+    OpenAlexBudgetGuard,
+    OpenAlexRateLimit,
+)
 from backend.app.main import app
-from backend.app.models import IngestionJob, Publication, PublicationEmbedding
+from backend.app.models import (
+    IngestionJob,
+    OpenAlexDailyUsage,
+    OpenAlexUsageEvent,
+    Publication,
+    PublicationEmbedding,
+)
 from backend.app.services.search import search_publications
 
 
@@ -138,10 +153,340 @@ def test_rate_limit_retry_after_is_honored_and_key_is_not_logged():
         sleep=delays.append,
     )
     try:
+        assert "fixture-secret" not in repr(client)
+        assert "fixture-secret" not in repr(client.client.auth)
+        assert "fixture-secret" not in repr(client.client.headers)
         assert client.fetch_page(cursor="*", filters={})["results"] == []
     finally:
         client.close()
     assert request_count == 2 and delays == [0.0]
+
+
+def test_openalex_response_preserves_rate_limit_headers_with_payload():
+    def response(request):
+        return httpx.Response(
+            200,
+            headers={
+                "X-RateLimit-Limit": "10000",
+                "X-RateLimit-Remaining": "8766",
+                "X-RateLimit-Credits-Used": "1",
+                "X-RateLimit-Reset": "43200",
+            },
+            json={"meta": {"cost_usd": 0.0001}, "results": []},
+            request=request,
+        )
+
+    client = OpenAlexClient(
+        api_key="fixture-secret",
+        mailto="researcher@example.test",
+        transport=httpx.MockTransport(response),
+    )
+    try:
+        result = client.fetch_page_response(cursor="*", filters={})
+    finally:
+        client.close()
+
+    assert result.payload["results"] == []
+    assert result.headers["x-ratelimit-limit"] == "10000"
+    assert result.headers["x-ratelimit-reset"] == "43200"
+    assert result.rate_limit.limit_credits == 10000
+    assert result.rate_limit.remaining_credits == 8766
+    assert result.rate_limit.credits_used == 1
+    assert result.rate_limit.cost_usd == Decimal("0.0001")
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {
+            "X-RateLimit-Limit": "not-a-number",
+            "X-RateLimit-Remaining": "-1",
+            "X-RateLimit-Credits-Used": "NaN",
+            "X-RateLimit-Reset": "tomorrow",
+        },
+    ],
+)
+def test_malformed_or_missing_rate_headers_remain_unknown(headers):
+    parsed = OpenAlexRateLimit.from_response(headers)
+    assert parsed.limit_credits is None
+    assert parsed.remaining_credits is None
+    assert parsed.credits_used is None
+    assert parsed.reset_seconds is None
+    assert parsed.cost_usd is None
+    assert parsed.complete is False
+
+
+def test_current_usage_json_schema_is_supported_without_confusing_daily_and_request_usage():
+    fixed_now = datetime(2026, 11, 1, 12, tzinfo=UTC)
+    parsed = OpenAlexRateLimit.from_response(
+        {},
+        {
+            "daily_budget_usd": 1.0,
+            "daily_used_usd": 0.2,
+            "daily_remaining_usd": 0.8,
+            "resets_at": "2026-11-02T00:00:00Z",
+            "prepaid_balance_usd": 5.0,
+            "prepaid_remaining_usd": 4.0,
+            "meta": {"cost": 0.0001},
+        },
+        now=fixed_now,
+    )
+    assert parsed.limit_credits == Decimal("10000")
+    assert parsed.remaining_credits == Decimal("8000.0")
+    assert parsed.credits_used == Decimal("1")
+    assert parsed.cost_usd == Decimal("0.0001")
+    assert parsed.reset_seconds == 43200
+    assert parsed.complete
+
+
+def test_legacy_usage_json_schema_and_case_insensitive_headers():
+    fixed_now = datetime(2026, 11, 1, 12, tzinfo=UTC)
+    parsed = OpenAlexRateLimit.from_response(
+        {
+            "x-ratelimit-limit": "10000",
+            "X-RATELIMIT-REMAINING": "9000",
+            "x-ratelimit-credits-used": "1",
+            "X-RateLimit-Reset": "3600",
+        },
+        {"meta": {"cost_usd": 0.0001}},
+        now=fixed_now,
+    )
+    assert parsed.limit_credits == Decimal("10000")
+    assert parsed.remaining_credits == Decimal("9000")
+    assert parsed.credits_used == 1
+    assert parsed.cost_usd == Decimal("0.0001")
+    assert parsed.reset_seconds == 3600
+    assert parsed.complete
+
+    body_only = OpenAlexRateLimit.from_response(
+        {},
+        {
+            "meta": {
+                "daily_budget_usd": 1.0,
+                "daily_used_usd": 0.1,
+                "daily_remaining_usd": 0.9,
+                "resets_at": "2026-11-01T13:00:00Z",
+                "cost_usd": 0.0002,
+            }
+        },
+        now=fixed_now,
+    )
+    assert body_only.limit_credits == Decimal("10000")
+    assert body_only.remaining_credits == Decimal("9000.0")
+    assert body_only.credits_used == Decimal("2")
+    assert body_only.reset_seconds == 3600
+    assert body_only.complete
+
+
+def test_missing_and_conflicting_budget_values_fail_closed():
+    missing = OpenAlexRateLimit.from_response(
+        {},
+        {
+            "daily_budget_usd": 1.0,
+            "daily_used_usd": 0.2,
+            "daily_remaining_usd": 0.8,
+            "resets_at": "2026-11-02T00:00:00Z",
+        },
+        now=datetime(2026, 11, 1, 12, tzinfo=UTC),
+    )
+    assert missing.limit_credits == 10000
+    assert missing.remaining_credits == 8000
+    assert missing.credits_used is None and missing.cost_usd is None
+    assert missing.reset_seconds == 43200 and not missing.complete
+
+    conflicting = OpenAlexRateLimit.from_response(
+        {"X-RateLimit-Limit": "10000", "X-RateLimit-Remaining": "7000"},
+        {
+            "daily_budget_usd": 1.0,
+            "daily_used_usd": 0.2,
+            "daily_remaining_usd": 0.8,
+            "resets_at": "2026-11-02T00:00:00Z",
+            "meta": {"cost_usd": 0.0001},
+        },
+        now=datetime(2026, 11, 1, 12, tzinfo=UTC),
+    )
+    assert conflicting.remaining_credits is None
+    assert conflicting.complete is False
+
+
+def test_rate_limit_endpoint_accepts_bearer_auth_and_parses_usage_body_without_leaking_key():
+    secret = "fixture-secret-never-print"
+
+    def response(request):
+        assert request.url.path == "/rate-limit"
+        assert request.headers["Authorization"] == f"Bearer {secret}"
+        assert "api_key" not in request.url.params
+        return httpx.Response(
+            200,
+            headers={"X-RateLimit-Credits-Used": "1"},
+            json={
+                "daily_budget_usd": 1.0,
+                "daily_used_usd": 0.2,
+                "daily_remaining_usd": 0.8,
+                "resets_at": "2026-11-02T00:00:00Z",
+                "meta": {"cost_usd": 0.0001},
+            },
+            request=request,
+        )
+
+    client = OpenAlexClient(
+        api_key=secret,
+        mailto="researcher@example.test",
+        transport=httpx.MockTransport(response),
+    )
+    try:
+        result = client.fetch_rate_limit()
+        assert result.rate_limit.complete
+        assert secret not in repr(client)
+        assert secret not in repr(result)
+    finally:
+        client.close()
+
+
+def _rate_headers(*, limit="10000", remaining="9900", used="1", reset="3600"):
+    return OpenAlexRateLimit.from_response(
+        {
+            "X-RateLimit-Limit": limit,
+            "X-RateLimit-Remaining": remaining,
+            "X-RateLimit-Credits-Used": used,
+            "X-RateLimit-Reset": reset,
+        }
+    )
+
+
+def test_budget_guard_persists_project_usage_across_sessions(database):
+    guard = OpenAlexBudgetGuard()
+    now = datetime(2026, 11, 1, 12, tzinfo=UTC)
+    reservation = guard.reserve(
+        database, Decimal("0.0001"), now=now, allow_initial_budget_check=True
+    )
+    guard.record_response(database, reservation, _rate_headers(), now=now)
+    assert guard.usage_for_day(database, now=now) == Decimal("0.0001")
+
+    sessions = sessionmaker(bind=database.get_bind(), expire_on_commit=False)
+    with sessions() as reopened_session:
+        assert guard.usage_for_day(reopened_session, now=now) == Decimal("0.0001")
+        next_request = guard.reserve(reopened_session, Decimal("0.0001"), now=now)
+        assert next_request.amount_usd == Decimal("0.0001")
+
+
+def test_budget_check_reserves_headroom_and_records_nonzero_response_cost(database):
+    guard = OpenAlexBudgetGuard()
+    now = datetime(2026, 11, 1, 12, tzinfo=UTC)
+    reservation = guard.reserve_budget_check(database, now=now)
+    assert reservation.amount_usd == DEFAULT_DAILY_CEILING_USD
+    guard.record_response(database, reservation, _rate_headers(), now=now)
+    assert guard.usage_for_day(database, now=now) == Decimal("0.0001")
+    next_check = guard.reserve_budget_check(database, now=now)
+    assert next_check.amount_usd == DEFAULT_DAILY_CEILING_USD - Decimal("0.0001")
+
+
+def test_budget_guard_refuses_when_account_or_project_ceiling_is_exhausted(database):
+    guard = OpenAlexBudgetGuard()
+    now = datetime(2026, 11, 1, 12, tzinfo=UTC)
+    reservation = guard.reserve(
+        database, DEFAULT_DAILY_CEILING_USD, now=now, allow_initial_budget_check=True
+    )
+    costly_response = OpenAlexRateLimit.from_response(
+        {
+            "X-RateLimit-Limit": "10000",
+            "X-RateLimit-Remaining": "9900",
+            "X-RateLimit-Credits-Used": "1000",
+            "X-RateLimit-Reset": "3600",
+        },
+        {"meta": {"cost_usd": 0.1}},
+    )
+    guard.record_response(database, reservation, costly_response, now=now)
+    with pytest.raises(OpenAlexBudgetError, match="project spending ceiling"):
+        guard.reserve(database, Decimal("0.0001"), now=now)
+
+
+def test_budget_guard_refuses_when_external_account_usage_exceeds_ceiling(database):
+    guard = OpenAlexBudgetGuard()
+    now = datetime(2026, 11, 1, 12, tzinfo=UTC)
+    reservation = guard.reserve(
+        database, Decimal("0.0001"), now=now, allow_initial_budget_check=True
+    )
+    guard.record_response(
+        database,
+        reservation,
+        _rate_headers(remaining="8900"),
+        now=now,
+    )
+    with pytest.raises(OpenAlexBudgetError, match="daily usage exceeds"):
+        guard.reserve(database, Decimal("0.0001"), now=now)
+
+
+def test_budget_guard_fails_closed_on_unknown_snapshot_and_resets_by_utc_day(database):
+    guard = OpenAlexBudgetGuard()
+    local_time = datetime.fromisoformat("2026-11-02T00:30:00+02:00")
+    utc_time = local_time.astimezone(UTC)
+    assert utc_time.date().isoformat() == "2026-11-01"
+    reservation = guard.reserve(
+        database, Decimal("0.0001"), now=local_time, allow_initial_budget_check=True
+    )
+    incomplete = OpenAlexRateLimit.from_response({"X-RateLimit-Limit": "10000"})
+    guard.record_response(database, reservation, incomplete, now=local_time)
+    with pytest.raises(OpenAlexBudgetError, match="unverified"):
+        guard.reserve(database, Decimal("0.0001"), now=utc_time)
+
+    next_day = datetime(2026, 11, 2, 0, 1, tzinfo=UTC)
+    assert guard.usage_for_day(database, now=next_day) == Decimal("0")
+    bootstrap = guard.reserve(
+        database, Decimal("0.0001"), now=next_day, allow_initial_budget_check=True
+    )
+    assert bootstrap.utc_date == next_day.date()
+
+
+def test_manual_dashboard_reconciliation_preserves_history_and_allows_bounded_request(database):
+    now = datetime(2026, 11, 1, 12, tzinfo=UTC)
+    row = OpenAlexDailyUsage(
+        utc_date=now.date(),
+        project_spend_usd=Decimal("0.10"),
+        reserved_usd=Decimal("0"),
+        request_count=1,
+        budget_verified=False,
+    )
+    database.add(row)
+    database.add(
+        OpenAlexUsageEvent(
+            utc_date=now.date(),
+            event_type="legacy_aggregate",
+            amount_usd=Decimal("0.10"),
+            actual_cost_known=False,
+            details={"request_level_costs": "unknown"},
+        )
+    )
+    database.commit()
+
+    guard = OpenAlexBudgetGuard()
+    guard.record_manual_reconciliation(
+        database,
+        daily_budget_usd=Decimal("1.00"),
+        daily_used_usd=Decimal("0.00"),
+        daily_remaining_usd=Decimal("1.00"),
+        reset_at=datetime(2026, 11, 2, 0, tzinfo=UTC),
+        evidence="User-reported official dashboard reading",
+        now=now,
+    )
+    refreshed = database.get(OpenAlexDailyUsage, now.date())
+    assert refreshed.project_spend_usd == Decimal("0.00")
+    assert refreshed.request_count == 1
+    assert refreshed.daily_limit_credits == Decimal("10000")
+    assert refreshed.remaining_credits == Decimal("10000")
+    assert refreshed.last_credits_used is None
+    assert refreshed.budget_verified
+    events = list(database.scalars(select(OpenAlexUsageEvent).order_by(OpenAlexUsageEvent.id)))
+    assert events[0].event_type == "legacy_aggregate"
+    assert events[0].actual_cost_known is False
+    assert events[1].event_type == "manual_reconciliation"
+    assert events[1].amount_usd == Decimal("-0.10")
+    assert events[1].details["prior_request_cost"] == "unknown"
+
+    reservation = guard.reserve(database, Decimal("0.0001"), now=now)
+    assert reservation.amount_usd == Decimal("0.0001")
+    assert refreshed.reserved_usd == Decimal("0.0001")
 
 
 def test_upsert_is_idempotent_and_preserves_missing_vs_zero(database):
@@ -276,6 +621,71 @@ def test_search_api_returns_actual_persisted_publication_and_method(database):
     assert payload["retrieval_method"] == "lexical"
     assert payload["results"][0]["openalex_id"] == "https://openalex.org/W100"
     assert payload["results"][0]["cited_by_count"] == 0
+
+
+def test_hybrid_search_filters_paginates_and_semantic_sort_is_global(database, monkeypatch):
+    upsert_page(
+        database,
+        [
+            {"id": "https://openalex.org/W200", "title": "protein structure methods", "publication_date": "2020-01-01", "cited_by_count": 4},
+            {"id": "https://openalex.org/W201", "title": "protein structure evaluation", "publication_date": "2024-01-01", "cited_by_count": 12},
+        ],
+    )
+    database.commit()
+    publications = list(database.scalars(select(Publication).order_by(Publication.id)))
+    for publication in publications:
+        database.add(
+            PublicationEmbedding(
+                publication_id=publication.id,
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                model_version="fastembed-0.9.1",
+                dimensions=384,
+                content_hash=publication.embedding_text_hash or "fixture-hash",
+                status="complete",
+                vector=np.ones(384, dtype=np.float32).tolist(),
+            )
+        )
+    database.commit()
+
+    import backend.app.services.search as search_service
+
+    class QueryEncoder:
+        def embed(self, texts):
+            assert len(texts) == 1
+            return [np.ones(384, dtype=np.float32)]
+
+    monkeypatch.setattr(search_service, "FastEmbedEncoder", lambda _: QueryEncoder())
+    from backend.app.services.search import search_publications_page
+
+    semantic = search_publications_page(
+        database, "protein", "semantic", limit=1, offset=0, sort_by="date"
+    )
+    assert semantic.total == 2
+    assert semantic.hits[0].publication.openalex_id == "https://openalex.org/W201"
+    hybrid = search_publications_page(
+        database,
+        "protein",
+        "hybrid",
+        limit=1,
+        filters={"year_from": 2024},
+    )
+    assert hybrid.total == 1
+    assert hybrid.capped is False
+    assert hybrid.hits[0].publication.openalex_id == "https://openalex.org/W201"
+    assert "Hybrid RRF" in hybrid.hits[0].explanation
+
+    def override_db():
+        yield database
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        with TestClient(app) as test_client:
+            related = test_client.get(f"/api/v1/publications/{publications[0].id}/related")
+    finally:
+        app.dependency_overrides.clear()
+    assert related.status_code == 200
+    assert related.json()["retrieval_method"] == "semantic_similarity"
+    assert related.json()["results"][0]["openalex_id"] == "https://openalex.org/W201"
 
 
 def test_postgresql_publication_persistence_and_search_in_ci():

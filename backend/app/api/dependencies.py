@@ -26,3 +26,16 @@ def current_user(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session"
         )
     return user
+
+
+def optional_current_user(
+    access_token: str | None = Cookie(default=None), db: Session = Depends(get_db)
+) -> User | None:
+    """Return the authenticated user when present; public search remains public."""
+    if not access_token:
+        return None
+    try:
+        user_id = read_access_token(access_token)
+    except (jwt.InvalidTokenError, ValueError, KeyError):
+        return None
+    return db.get(User, user_id)
