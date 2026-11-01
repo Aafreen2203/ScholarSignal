@@ -1,0 +1,58 @@
+services:
+  frontend:
+    build: ./frontend
+    environment:
+      API_INTERNAL_URL: http://backend:8000
+    ports: ["3000:3000"]
+    depends_on: [backend]
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+      DATABASE_URL: postgresql+psycopg://scholarsignal:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/scholarsignal
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?Set a long random JWT_SECRET in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      OPENALEX_API_KEY: ${OPENALEX_API_KEY:-}
+      OPENALEX_MAILTO: ${OPENALEX_MAILTO:-}
+      OPENALEX_BASE_URL: ${OPENALEX_BASE_URL:-https://api.openalex.org}
+      OPENALEX_PER_PAGE: ${OPENALEX_PER_PAGE:-100}
+      OPENALEX_DEFAULT_LIMIT: ${OPENALEX_DEFAULT_LIMIT:-25}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
+      EMBEDDING_MODEL_VERSION: ${EMBEDDING_MODEL_VERSION:-fastembed-0.9.1}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+      FASTEMBED_CACHE_PATH: ${FASTEMBED_CACHE_PATH:-/app/model-cache}
+    volumes:
+      - embedding_cache:/app/model-cache
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: scholarsignal
+      POSTGRES_USER: scholarsignal
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports: ["5432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scholarsignal -d scholarsignal"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7.4-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  postgres_data:
+  embedding_cache:
+

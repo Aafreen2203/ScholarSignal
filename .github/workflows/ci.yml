@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: scholarsignal_test
+          POSTGRES_USER: scholarsignal
+          POSTGRES_PASSWORD: scholarsignal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scholarsignal -d scholarsignal_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+    env:
+      APP_ENV: ci
+      DATABASE_URL: postgresql+psycopg://scholarsignal:scholarsignal@127.0.0.1:5432/scholarsignal_test
+      REDIS_URL: redis://127.0.0.1:6379/0
+      JWT_SECRET: ci-only-test-secret-with-more-than-thirty-two-characters
+      COOKIE_SECURE: "false"
+      FRONTEND_ORIGIN: http://127.0.0.1:3000
+      API_INTERNAL_URL: http://127.0.0.1:8000
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Apply Alembic migrations to PostgreSQL
+        run: alembic upgrade head
+      - name: Verify migrations and real PostgreSQL/Redis auth integration
+        run: pytest -q
+      - run: ruff check backend
+      - run: python -m compileall -q backend
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend static checks
+        working-directory: frontend
+        run: |
+          npm run typecheck
+          npm run lint
+          npm run build
+      - name: Install Playwright Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Start FastAPI against PostgreSQL and Redis
+        run: |
+          nohup uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 > /tmp/scholarsignal-api.log 2>&1 &
+          python - <<'PY'
+          import time
+          import urllib.error
+          import urllib.request
+
+          for attempt in range(60):
+              try:
+                  with urllib.request.urlopen("http://127.0.0.1:8000/health/ready", timeout=2) as response:
+                      if response.status == 200:
+                          print(response.read().decode())
+                          break
+              except (urllib.error.URLError, TimeoutError):
+                  time.sleep(1)
+          else:
+              raise SystemExit("API did not become ready; inspect /tmp/scholarsignal-api.log")
+          PY
+      - name: Run browser authentication and Next proxy tests
+        working-directory: frontend
+        run: npm run test:e2e
+

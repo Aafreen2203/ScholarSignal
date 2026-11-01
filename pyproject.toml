@@ -1,0 +1,42 @@
+[project]
+name = "scholarsignal-api"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.135.1",
+  "uvicorn[standard]==0.41.0",
+  "pydantic-settings==2.13.1",
+  "email-validator==2.3.0",
+  "sqlalchemy==2.0.48",
+  "alembic==1.18.4",
+  "psycopg[binary]==3.3.3",
+  "pwdlib[argon2]==0.3.0",
+  "PyJWT==2.12.1",
+  "redis==7.3.0",
+  "httpx==0.28.1",
+  "pgvector==0.4.2",
+  "fastembed==0.9.1",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["backend*"]
+exclude = ["backend.tests*"]
+
+[project.optional-dependencies]
+dev = ["pytest==9.0.2", "httpx==0.28.1", "ruff==0.15.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
